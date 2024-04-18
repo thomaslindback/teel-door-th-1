@@ -8,6 +8,7 @@
 
 #include <esp_err.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <nvs_flash.h>
 #if CONFIG_PM_ENABLE
 #include <esp_pm.h>
@@ -34,6 +35,10 @@ using namespace chip::app::Clusters;
 
 constexpr auto k_timeout_seconds = 300;
 
+uint16_t door_sensor_endpoint_id = 0;
+static esp_timer_handle_t s_reporting_timer;
+bool s_is_open = false;
+
 static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
 {
     switch (event->Type) {
@@ -43,6 +48,7 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
 
     case chip::DeviceLayer::DeviceEventType::kCommissioningComplete:
         ESP_LOGI(TAG, "Commissioning complete");
+        esp_timer_start_periodic(s_reporting_timer, (uint64_t)30000000ULL);
         break;
 
     case chip::DeviceLayer::DeviceEventType::kFailSafeTimerExpired:
@@ -123,9 +129,33 @@ static esp_err_t app_attribute_update_cb(attribute::callback_type_t type, uint16
     return err;
 }
 
+static void s_reporting_timer_callback(void* arg)
+{
+    // Enter deep sleep
+    ESP_LOGI(TAG, "Setting sensor value");
+    uint16_t endpoint_id = door_sensor_endpoint_id;
+    uint32_t cluster_id = BooleanState::Id;
+    uint32_t attribute_id = BooleanState::Attributes::StateValue::Id;
+    node_t *node = node::get();
+    endpoint_t *endpoint = endpoint::get(node, endpoint_id);
+    cluster_t *cluster = cluster::get(endpoint, cluster_id);
+    attribute_t *attribute = attribute::get(cluster, attribute_id);
+    esp_matter_attr_val_t val = esp_matter_invalid(NULL);
+    attribute::get_val(attribute, &val);
+    val.val.b = !val.val.b;
+    attribute::update(endpoint_id, cluster_id, attribute_id, &val);
+}
+
 extern "C" void app_main()
 {
     esp_err_t err = ESP_OK;
+
+    const esp_timer_create_args_t s_reporting_timer_args = {
+            .callback = &s_reporting_timer_callback,
+            .name = "reporting-timer"
+    };
+
+    ESP_ERROR_CHECK(esp_timer_create(&s_reporting_timer_args, &s_reporting_timer));
 
     /* Initialize the ESP NVS layer */
     nvs_flash_init();
@@ -150,10 +180,12 @@ extern "C" void app_main()
     //ABORT_APP_ON_FAILURE(app_endpoint != nullptr, ESP_LOGE(TAG, "Failed to create on off light endpoint"));
 
     endpoint::contact_sensor::config_t contact_sensor_conf_t;
+    contact_sensor_conf_t.boolean_state.state_value = true;
     endpoint_t *contact_sensor_endpoint = endpoint::contact_sensor::create(node, &contact_sensor_conf_t, ENDPOINT_FLAG_NONE, NULL);
     ABORT_APP_ON_FAILURE(contact_sensor_endpoint != nullptr, ESP_LOGE(TAG, "Failed to create contact sensor endpoint"));
 
-    
+    door_sensor_endpoint_id = endpoint::get_id(contact_sensor_endpoint);
+
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
     /* Set OpenThread platform config */
     esp_openthread_platform_config_t config = {
