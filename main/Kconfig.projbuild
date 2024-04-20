@@ -1,0 +1,15 @@
+menu "TEEL Door TH 1"
+
+    config STATUS_LED_PIN
+        int 'Pin for status led'
+        default 8
+        help
+            Pin number for the status led
+            
+    config CONTACT_SENSOR_PIN
+        int 'Pin for contact sensor'
+        default 3
+        help 
+            Pin number for contact sensor. 
+
+endmenu

@@ -9,6 +9,7 @@
 #include <esp_err.h>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <esp_event.h>
 #include <nvs_flash.h>
 #if CONFIG_PM_ENABLE
 #include <esp_pm.h>
@@ -38,6 +39,14 @@ constexpr auto k_timeout_seconds = 300;
 uint16_t door_sensor_endpoint_id = 0;
 static esp_timer_handle_t s_reporting_timer;
 bool s_is_open = false;
+
+esp_event_loop_handle_t loop_handle;
+ESP_EVENT_DECLARE_BASE(TEEL_DOOR_EVENTS);
+ESP_EVENT_DEFINE_BASE(TEEL_DOOR_EVENTS);
+enum {
+    TEEL_DOOR_EVENT
+};
+
 
 static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
 {
@@ -133,8 +142,12 @@ static esp_err_t app_attribute_update_cb(attribute::callback_type_t type, uint16
     return err;
 }
 
-static void s_reporting_timer_callback(void* arg)
-{
+// 1. Define the event handler
+static void event_handler(void* handler_arg, esp_event_base_t base, int32_t id, void* event_data) {
+    s_reporting_timer_callback(event_data);
+}
+
+static void s_reporting_timer_callback(void* arg) {
     // Enter deep sleep
     ESP_LOGI(TAG, "Setting sensor value");
     uint16_t endpoint_id = door_sensor_endpoint_id;
@@ -150,8 +163,39 @@ static void s_reporting_timer_callback(void* arg)
     attribute::update(endpoint_id, cluster_id, attribute_id, &val);
 }
 
+uint64_t time_door_event;
+bool inHandleButton = false;
+uint64_t lastIRSTime = 0;
+void AppTask::gpio_isr_contact_sensor_handler(void* arg) {
+    if((esp_timer_get_time() - lastIRSTime) > 1000000) {
+        inHandleButton = false;
+    }
+    lastIRSTime = esp_timer_get_time();
+    if(inHandleButton) {
+        return;
+    }
+    inHandleButton = true;
+
+    esp_event_post_to(loop_handle, TEEL_DOOR_EVENTS, TEEL_DOOR_EVENT, ...);
+}
+
+esp_err_t setup_door_sensor() {
+    gpio_config_t io_conf = {
+        .pin_bit_mask = 1ULL<<CONTACT_SENSOR_PIN,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_ANYEDGE
+    };
+    gpio_config(&io_conf);
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add((gpio_num_t)CONTACT_SENSOR_PIN, 
+        gpio_isr_contact_sensor_handler, (void*) CONTACT_SENSOR_PIN);
+}
+
 extern "C" void app_main()
 {
+
     esp_err_t err = ESP_OK;
 
     const esp_timer_create_args_t s_reporting_timer_args = {
@@ -160,6 +204,16 @@ extern "C" void app_main()
     };
 
     ESP_ERROR_CHECK(esp_timer_create(&s_reporting_timer_args, &s_reporting_timer));
+
+
+    esp_event_loop_args_t loop_task_args = {
+        .queue_size = 5,
+        .task_name = NULL // no task will be created
+    };
+    
+    esp_event_loop_create(&loop_args, &loop_handle);
+    esp_event_handler_register_with(loop_handle, TEEL_DOOR_EVENTS, TEEL_DOOR_EVENT, event_handler, NULL);
+
 
     /* Initialize the ESP NVS layer */
     nvs_flash_init();
